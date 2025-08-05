@@ -17,32 +17,24 @@ from telegram.ext import (
     filters
 )
 
-# logging configs
+# Configure logging to file
 logging.basicConfig(
-    level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO,
     handlers=[
-        logging.FileHandler("bot.log", encoding='utf-8')
+        logging.FileHandler("bot.log", encoding='utf-8'),
+        logging.StreamHandler()
     ]
 )
 logger = logging.getLogger(__name__)
 
-noisy_loggers = [
-    "telegram.ext.Updater",
-    "telegram.bot",
-    "httpcore",
-    "httpx"
-]
-for logger_name in noisy_loggers:
-    logging.getLogger(logger_name).setLevel(logging.WARNING)
-
-# Configs
+# Configuration
 DB_NAME = "words_database.db"
 CONFIG_FILE = "bot_config.env"
 MOSCOW_TIMEZONE = pytz.timezone('Europe/Moscow')  # UTC+3
 
 def load_config():
-    """Bot loading"""
+    """Load bot token from environment or config file"""
     token = os.getenv("TELEGRAM_BOT_TOKEN")
     
     if not token and os.path.exists(CONFIG_FILE):
@@ -53,25 +45,27 @@ def load_config():
                         token = line.split('=')[1].strip()
                         break
         except Exception as e:
-            logger.error(f"Cant open config file: {e}")
+            logger.error(f"Config file error: {e}")
     
     if not token:
-        logger.critical("Cant find a token!")
+        logger.critical("Bot token not found!")
         sys.exit(1)
     
     return token
 
 def init_database():
-    """DB init"""
+    """Initialize database file if missing"""
     if not os.path.exists(DB_NAME):
         with sqlite3.connect(DB_NAME) as conn:
-            logger.info(f"Created DB: {DB_NAME}")
+            logger.info(f"Created new database: {DB_NAME}")
 
 def safe_table_name(chat_id: int) -> str:
-    """Table safe name generation"""
+    """Generate safe SQL table name from chat ID"""
+    # Remove sign and keep only digits
     return f"chat_{re.sub(r'[^0-9]', '', str(chat_id))}_words"
 
 def create_chat_table(chat_id: int):
+    """Create word table for chat if not exists"""
     table_name = safe_table_name(chat_id)
     
     try:
@@ -82,11 +76,12 @@ def create_chat_table(chat_id: int):
                     word TEXT NOT NULL UNIQUE
                 )
             """)
-        logger.info(f"Table for chat created: {chat_id}")
+        logger.info(f"Created table for chat {chat_id}: {table_name}")
     except Exception as e:
-        logger.error(f"Table creating error: {e}", exc_info=True)
+        logger.error(f"Table creation error: {e}", exc_info=True)
 
 def get_active_chats():
+    """Retrieve all group chats with non-empty word tables"""
     active_chats = []
     try:
         with sqlite3.connect(DB_NAME) as conn:
@@ -99,8 +94,10 @@ def get_active_chats():
                 if table_name.startswith("chat_") and table_name.endswith("_words"):
                     chat_id_str = table_name.replace("chat_", "").replace("_words", "")
                     
+                    # Only process group chats (negative IDs)
                     try:
                         chat_id = int(chat_id_str)
+                        # Convert to negative ID for groups
                         if chat_id > 0:
                             chat_id = -chat_id
                     except ValueError:
@@ -111,11 +108,12 @@ def get_active_chats():
                         active_chats.append(chat_id)
     
     except Exception as e:
-        logger.error(f"Cant get active chats: {e}")
+        logger.error(f"Active chats error: {e}")
     
     return active_chats
 
 def get_random_words(chat_id: int, count=5):
+    """Retrieve random words from chat's table"""
     table_name = safe_table_name(chat_id)
     words = []
     
@@ -136,11 +134,12 @@ def get_random_words(chat_id: int, count=5):
                 words = [row[0] for row in cursor.fetchall()]
     
     except Exception as e:
-        logger.error(f"Cant get words for a chat {chat_id}: {e}")
+        logger.error(f"Word retrieval error for chat {chat_id}: {e}")
     
     return words
 
 def add_words_to_table(chat_id: int, words: list) -> int:
+    """Add words to chat table, ignore duplicates"""
     table_name = safe_table_name(chat_id)
     added_count = 0
     
@@ -148,11 +147,13 @@ def add_words_to_table(chat_id: int, words: list) -> int:
         with sqlite3.connect(DB_NAME) as conn:
             cursor = conn.cursor()
             
+            # Verify table exists
             cursor.execute(f"SELECT name FROM sqlite_master WHERE type='table' AND name='{table_name}'")
             if not cursor.fetchone():
-                logger.info(f"Creating table for a chat: {chat_id}")
+                logger.warning(f"Table {table_name} missing! Creating...")
                 create_chat_table(chat_id)
             
+            # Insert words
             for word in words:
                 clean_word = word.strip()
                 if not clean_word:
@@ -162,42 +163,45 @@ def add_words_to_table(chat_id: int, words: list) -> int:
                     cursor.execute(f'INSERT INTO "{table_name}" (word) VALUES (?)', (clean_word,))
                     added_count += 1
                 except sqlite3.IntegrityError:
-                    pass
+                    pass  # Duplicate handling
                 except Exception as e:
-                    logger.error(f"Adding word error: {e}")
+                    logger.error(f"Word insertion error '{clean_word}': {e}")
             
             conn.commit()
         
-        logger.info(f"Adding word: {added_count}/{len(words)} in chat {chat_id}")
+        logger.info(f"Added {added_count}/{len(words)} words to chat {chat_id}")
         return added_count
         
     except Exception as e:
-        logger.error(f"Adding word critical error: {e}", exc_info=True)
+        logger.error(f"Critical word addition error: {e}", exc_info=True)
         return 0
 
 async def send_random_words(context: ContextTypes.DEFAULT_TYPE):
-    logger.info("Daily messaging")
+    """Send random words to all active group chats"""
+    logger.info("Starting daily word distribution")
     active_chats = get_active_chats()
     
     if not active_chats:
-        logger.info("Cant find active chats")
+        logger.info("No active group chats found")
         return
     
-    logger.info(f"Active chats count: {len(active_chats)}")
+    logger.info(f"Found {len(active_chats)} active group chats")
     
     for chat_id in active_chats:
         try:
-            # only group chats
+            # Only send to group chats (negative IDs)
             if chat_id > 0:
+                logger.info(f"Skipping personal chat {chat_id}")
                 continue
                 
             words = get_random_words(chat_id)
             
             if not words:
-                logger.info(f"Emty word list for chat: {chat_id}")
+                logger.info(f"No words for chat {chat_id}")
                 continue
                 
-            message = "📚 Random words for repetition:\n\n"
+            # Format message in Russian
+            message = "📚 Случайные слова дня для повторения:\n\n"
             for i, word in enumerate(words, 1):
                 message += f"{i}. {word}\n"
             
@@ -205,21 +209,27 @@ async def send_random_words(context: ContextTypes.DEFAULT_TYPE):
                 chat_id=chat_id,
                 text=message
             )
-            logger.info(f"Sent words: {len(words)} into the chat {chat_id}")
+            logger.info(f"Sent {len(words)} words to group chat {chat_id}")
             
+            # Short delay between messages
             await asyncio.sleep(0.5)
             
         except Exception as e:
-            logger.error(f"Error sending words to the chat {chat_id}: {e}")
+            logger.error(f"Message send error to chat {chat_id}: {e}")
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /start command in private chats"""
     user = update.effective_user
-    logger.info(f"Bot start by user: {user.id}")
+    logger.info(f"User {user.id} started bot")
     await update.message.reply_text(
-        f"Hello {user.first_name}! I'm a bot who will help you with words in chats.\n\n"
+        f"Привет {user.first_name}! Я бот для работы с группами.\n\n"
+        "Добавь меня в группу, и я буду автоматически сохранять слова из сообщений "
+        "с пометкой #WordsToLearn.\n\n"
+        "Каждый день в 12:00 по МСК я буду отправлять 5 случайных слов для повторения!"
     )
 
 async def handle_chat_addition(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Process bot being added to chats"""
     if update.my_chat_member:
         change = update.my_chat_member
         new_status = change.new_chat_member.status
@@ -227,14 +237,18 @@ async def handle_chat_addition(update: Update, context: ContextTypes.DEFAULT_TYP
         if new_status in ["member", "administrator"]:
             chat = change.chat
             chat_id = chat.id
-            chat_name = chat.title or "группа"
+            chat_name = chat.title or "this chat"
             
-            logger.info(f"Bot has been added to the chat: {chat_id} ({chat_name})")
+            logger.info(f"Bot added to chat: {chat_id} ({chat_name})")
             
+            # Only create tables for group chats
             if chat_id < 0:
                 create_chat_table(chat_id)
+            else:
+                logger.info(f"Skipping table creation for personal chat {chat_id}")
 
 async def handle_word_messages(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Process messages with #WordsToLearn tag"""
     message = update.message
     if not message or not message.text:
         return
@@ -243,13 +257,20 @@ async def handle_word_messages(update: Update, context: ContextTypes.DEFAULT_TYP
     text = message.text.strip()
     user_id = message.from_user.id
     
-    # Only group chats
+    # Only process messages from group chats
     if chat_id > 0:
+        logger.info(f"Ignoring message from personal chat {chat_id}")
         return
     
+    # Log all messages for debugging
+    logger.debug(f"Received message in group {chat_id}: {text[:50]}...")
+    
+    # Check for tag
     if not re.search(r'^\s*#WordsToLearn\b', text, re.IGNORECASE):
+        logger.debug(f"Message does not contain #WordsToLearn tag")
         return
     
+    # Extract words
     lines = text.split('\n')
     words = []
     found_hashtag = False
@@ -267,50 +288,61 @@ async def handle_word_messages(update: Update, context: ContextTypes.DEFAULT_TYP
             words.append(clean_line)
     
     if not words:
-        logger.info(f"Empty message from {user_id} in the {chat_id}")
+        logger.info(f"Empty word message from {user_id} in {chat_id}")
         return
         
+    # Add to database
     added_count = add_words_to_table(chat_id, words)
-    logger.info(f"Message processed: adding words {added_count} in chat {chat_id}")
+    logger.info(f"Processed message: added {added_count} words in group chat {chat_id}")
 
 def main() -> None:
+    """Launch the bot"""
     TOKEN = load_config()
-    logger.info(f"Using DB: {os.path.abspath(DB_NAME)}")
+    db_path = os.path.abspath(DB_NAME)
+    logger.info(f"Using database: {db_path}")
     
     if not os.path.exists(DB_NAME):
-        logger.info("Creating DB file")
+        logger.warning("Creating new database file")
     
     init_database()
     
     try:
+        # Create application with job queue support
         application = Application.builder().token(TOKEN).build()
         
+        # Verify job queue availability
         if not application.job_queue:
-            logger.critical("Task queue is not available! Make sure it is installed: pip install \"python-telegram-bot[job-queue]\"")
+            logger.critical("Job queue not initialized! Make sure you installed with: pip install \"python-telegram-bot[job-queue]\"")
             sys.exit(1)
             
+        # Register handlers
         application.add_handler(CommandHandler("start", start_command))
         application.add_handler(ChatMemberHandler(handle_chat_addition))
+        
+        # Fixed message handler - removed ChatType filter
         application.add_handler(MessageHandler(
             filters.TEXT & ~filters.COMMAND, 
             handle_word_messages
         ))
         
+        # Schedule daily word distribution at 12:00 Moscow time (UTC+3)
+        # Create time object for 12:00 in Moscow timezone
         moscow_time = time(hour=12, minute=0, tzinfo=MOSCOW_TIMEZONE)
+        
         application.job_queue.run_daily(
             callback=send_random_words,
             time=moscow_time,
-            days=(0, 1, 2, 3, 4, 5, 6),
+            days=(0, 1, 2, 3, 4, 5, 6),  # Every day of the week
             name="daily_word_distribution"
         )
-        logger.info(f"The word distribution is scheduled for 12:00 UTC+3")
+        logger.info(f"Scheduled daily word distribution at 12:00 Moscow time (UTC+3)")
         
-        # Запуск бота
-        logger.info("The bot has been launched")
+        # Start polling
+        logger.info("Bot starting")
         application.run_polling()
         
     except Exception as e:
-        logger.critical(f"Error starting bot: {e}", exc_info=True)
+        logger.critical(f"Bot initialization failed: {e}", exc_info=True)
         sys.exit(1)
 
 if __name__ == '__main__':
