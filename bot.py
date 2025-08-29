@@ -201,7 +201,7 @@ async def send_random_words(context: ContextTypes.DEFAULT_TYPE):
                 continue
                 
             # Format message in Russian
-            message = "📚 Случайные слова дня для повторения:\n\n"
+            message = "📚 Words to revise:\n\n"
             for i, word in enumerate(words, 1):
                 message += f"{i}. {word}\n"
             
