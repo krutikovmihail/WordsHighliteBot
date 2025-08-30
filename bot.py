@@ -29,7 +29,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Configuration
-DB_NAME = "words_database.db"
+DB_NAME = "/db/words_database.db"
 CONFIG_FILE = "bot_config.env"
 MOSCOW_TIMEZONE = pytz.timezone('Europe/Moscow')  # UTC+3
 
